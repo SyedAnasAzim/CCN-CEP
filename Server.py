@@ -22,7 +22,7 @@ def recv_full(sock,filesize):
             break
         buf.extend(data)
         got_data += min(chunk_size,filesize-got_data)
-        print(got_data)
+        # print(got_data)
     return bytes(buf)
 
 
@@ -36,13 +36,14 @@ print("Waiting for connection !!!")
 conn, add = server.accept()
 print(f"Connedted to [{add}]")
 
-msg = recv_until(conn,b"\n").decode()
-# msg = conn.recv(1024).decode()
-print(msg)
-
-data = recv_full(conn,int(msg.split()[1]))
-with open("received.jpg","wb") as f:
-    f.write(data)
+for i in range(3):
+    msg = recv_until(conn,b"\n").decode()
+    # msg = conn.recv(1024).decode()
+    print(msg)
+    msg = msg.split()
+    data = recv_full(conn,int(msg[2]))
+    with open(f"received_{msg[1]}.jpg","wb") as f:
+        f.write(data)
 
 conn.close()
 server.close()
