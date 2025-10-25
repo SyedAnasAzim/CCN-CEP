@@ -9,12 +9,12 @@ print(f"Lenght: {len(key)}bytes\n")
 
 #generating nonce
 nonce = os.urandom(12)
-print(nonce)
-print(len(nonce))
+
 cipher = AESGCM(key)
 
-plaintext = b"This is a secret message."
-print(f"Data: {plaintext}")
+with open("Text.txt","rb") as f:
+    plaintext = f.read()
+# print(f"Data: {plaintext}")
 print(f"Data(len): {len(plaintext)}\n")
 
 #encryption
@@ -26,7 +26,9 @@ print(f"lenght of data: {len(plaintext)}, lenght of tag: {len(ct) - len(plaintex
 #decryption
 try:
     decrypted = cipher.decrypt(nonce=nonce,data=ct,associated_data=None)
-    print(f"Decrypted Text: {decrypted}")
+    with open("Decrypted_T.txt","wb") as f:
+        f.write(decrypted)
+    # print(f"Decrypted Text: {decrypted}")
     print(f"Decrypted Text(len): {len(decrypted)}\n")
 except Exception as e:
     print(f"Decryption Failed: {e}\n")
