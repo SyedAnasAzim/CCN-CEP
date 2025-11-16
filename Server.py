@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.exceptions import InvalidTag
+from Client import format_bytes
 import hashlib
 
 IP = "localhost"
@@ -254,7 +255,7 @@ class Server:
             try:
                 filesize = os.path.getsize(filename)
                 print(f"[Info] File: {filename}")
-                print(f"[Info] Size: {filesize / (1024**2):.2f} MB ({filesize} bytes)")
+                print(f"[Info] Size: {format_bytes(filesize)} ({filesize} bytes)")
             except FileNotFoundError:
                 print(f"\n[Error] File not found: {filename}")
                 print("💡 Check the filename and try again")
@@ -396,7 +397,7 @@ class Server:
                     elif status == b"Ok":
                         print("[5/5] ✓ File sent successfully!")
                         print(f"      Total chunks: {chunk_number}")
-                        print(f"      Total size: {filesize / (1024**2):.2f} MB")
+                        print(f"      Total size: {format_bytes(filesize)}")
                         print(f"      Client confirmed: File received intact")
                         return True
                     else:

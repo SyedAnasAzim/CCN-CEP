@@ -411,7 +411,7 @@ class Client:
                 
                 print(f"[5/5] ✓ File saved successfully!")
                 print(f"      Location: {output_filename}")
-                print(f"      Size: {len(data) / (1024**2):.2f} MB")
+                print(f"      Size: {format_bytes(len(data))}")
                 return True
                 
             except PermissionError:

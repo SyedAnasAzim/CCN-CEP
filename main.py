@@ -9,7 +9,9 @@ from Client import Client
 import socket
 import os
 import sys
+from re import match
 
+IP_PATTERN = r"^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$"
 
 def get_my_ip():
     """Get local IP address"""
@@ -129,7 +131,8 @@ while True:
                 
                 if select == "1":
                     ip = input("\nEnter server IP address: ").strip()
-                    if not ip:
+                    match_ip = match(IP_PATTERN,ip)
+                    if not match_ip:
                         print("❌ No IP provided. Please try again.\n")
                         continue
                     print(f"\n✓ Connecting to: {ip}\n")
