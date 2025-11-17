@@ -7,13 +7,22 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.exceptions import InvalidTag
-from Client import format_bytes
 import hashlib
 
 IP = "localhost"
 PORT = 5000
 CHUNK_SIZE = 65536
 PATH = "CUBE Downloads"
+
+def format_bytes(b):
+    if b >= 1024**3:  # GB
+        return f"{b / 1024**3:.2f} GB"
+    elif b >= 1024**2:  # MB
+        return f"{b / 1024**2:.2f} MB"
+    elif b >= 1024:  # KB
+        return f"{b / 1024:.2f} KB"
+    else:  # Bytes
+        return f"{b} B"
 
 def format_time(sec):
     """Format seconds into hours:minutes:seconds"""
@@ -67,33 +76,31 @@ class BufferedSocket:
                     chunk = self.sock.recv(self.chunk_size)
                 except socket.timeout:
                     print("[Timeout] No data received within timeout period")
-                    raise 
+                    return None
                 except ConnectionResetError:
                     print("[Connection Error] Peer disconnected abruptly")
-                    raise
+                    return None
                 except BrokenPipeError:
                     print("[Connection Error] Connection broken mid-transfer")
-                    raise
+                    return None
                 except OSError as e:
                     print(f"[Socket Error] {e}")
-                    raise ConnectionError(f"Socket error during receive: {e}")
+                    print(ConnectionError(f"Socket error during receive: {e}"))
+                    return None
                 
                 if not chunk:
-                    break
+                    if self.buffer:
+                        print("[Connection Closed] Peer closed connection; discarding partial buffer")
+                        self.buffer.clear()
+                    return None
                 self.buffer.extend(chunk)
             
             # Return remaining buffer if connection closed
-            data = bytes(self.buffer)
-            self.buffer.clear()
-            return data
         
-        except (socket.timeout, ConnectionResetError, BrokenPipeError):
-            raise
         except Exception as e:
             print(f"[BufferedSocket Error] {e}")
             self.buffer.clear()
-            raise
-
+            return None
 
 class Server:
     """Server class for encrypted file transfer"""
@@ -106,23 +113,28 @@ class Server:
         self.conn = None
         self.buf_conn = None
         self.is_connected = False
+        self.not_connected_to_cli = False
         
         try:
             # 1. Create and configure socket
-            self._create_socket()
-            
+            if not self._create_socket():
+                print("[Socket Creation Failure]")
+                return
             # 2. Wait for connection
-            self._wait_for_connection()
-            
+            if not self._wait_for_connection():
+                print("[Socket Connection Failure]")
+                return
             # 3. Perform handshake
-            self._handshake()
-            
+            if not self._handshake():
+                print("[Socket Handshake Failure]")
+                return
             self.is_connected = True
             
         except Exception as e:
             # Cleanup and re-raise
+            print(f"[Error occured]: {e}")
             self.cleanup()
-            raise
+            return
     
     def _create_socket(self):
         """Create, configure, bind, and listen on socket"""
@@ -135,7 +147,7 @@ class Server:
             self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             
             # Set timeout
-            self.server.settimeout(30)
+            self.server.settimeout(60)
             
             # Bind to port
             try:
@@ -145,38 +157,38 @@ class Server:
                 if e.errno in [48, 98, 10048]:  # Port in use
                     print(f"\n❌ [Error] Port {self.port} is already in use!")
                     print("\n💡 Solutions:")
-                    print("   • Wait 30 seconds and try again")
+                    print("   • Wait 60 seconds and try again")
                     print("   • Close other programs using this port")
                     print(f"   • Change PORT in Server.py (currently {self.port})")
-                    raise
+                    return False
                 else:
                     print(f"[Bind Error] {e}")
-                    raise
+                    return False
             
             # Listen
             self.server.listen(1)
             print(f"[Server] Listening for connections...")
-            
+            return True
         except socket.error as e:
             print(f"[Socket Error] Failed to create socket: {e}")
-            raise
+            return False
     
     def _wait_for_connection(self):
         """Wait for client to connect"""
         try:
-            print("[Server] ⏳ Waiting for client (30 second timeout)...")
+            print("[Server] ⏳ Waiting for client (60 second timeout)...")
             self.conn, addr = self.server.accept()
             
             # Set timeout on connection socket too
-            self.conn.settimeout(30)
+            self.conn.settimeout(60)
             
             self.buf_conn = BufferedSocket(self.conn)
             print(f"[Server] ✓ Client connected from {addr[0]}:{addr[1]}")
-            
+            return True
         except socket.timeout:
-            print("\n[Timeout] No client connected within 30 seconds")
+            print("\n[Timeout] No client connected within 60 seconds")
             print("💡 Make sure client is trying to connect to this IP")
-            raise
+            return False
     
     def _handshake(self):
         """Perform three-way handshake"""
@@ -184,11 +196,14 @@ class Server:
             print("[Handshake] Starting handshake protocol...")
             
             # Step 1: Receive SYN
-            req = self.buf_conn.recv_until(b"\n").decode().strip()
+            req = self.buf_conn.recv_until(b"\n")
             if not req:
-                raise ConnectionError("Client disconnected before handshake")
+                print(ConnectionError("Client disconnected before handshake"))
+                return False
+            req = req.decode().strip()
             if req != "SYN":
-                raise ValueError(f"Expected SYN, got '{req}'")
+                print(ValueError(f"Expected SYN, got '{req}'"))
+                return False
             print("[Handshake] ← Received: SYN")
             
             # Step 2: Send SYN-ACK
@@ -196,24 +211,27 @@ class Server:
             print("[Handshake] → Sent: SYN-ACK")
             
             # Step 3: Receive ACK
-            req = self.buf_conn.recv_until(b"\n").decode().strip()
+            req = self.buf_conn.recv_until(b"\n")
             if not req:
-                raise ConnectionError("Client disconnected during handshake")
+                print(ConnectionError("Client disconnected during handshake"))
+                return False
+            req = req.decode().strip()
             if req != "ACK":
-                raise ValueError(f"Expected ACK, got '{req}'")
+                print(ValueError(f"Expected ACK, got '{req}'"))
+                return False
             print("[Handshake] ← Received: ACK")
             
             print("[Handshake] ✓ Handshake successful!\n")
-            
+            return True
         except socket.timeout:
             print("[Handshake Error] Timeout - client not responding")
-            raise
+            return False
         except ConnectionResetError:
             print("[Handshake Error] Client forcefully disconnected")
-            raise
+            return False
         except BrokenPipeError:
             print("[Handshake Error] Connection broken")
-            raise
+            return False
     
     def cleanup(self):
         """Clean up resources"""
@@ -239,8 +257,8 @@ class Server:
             print("📤 SENDING FILE TO CLIENT")
             print("="*60 + "\n")
             
-            command = input("Enter command (send <filename>): ").strip()
-            comm_list = command.split()
+            command = input("Enter command (send|<filename>): ").strip()
+            comm_list = command.split('|')
 
             # Validate command
             if len(comm_list) != 2 or comm_list[0].lower() != "send":
@@ -274,11 +292,11 @@ class Server:
 
             # Send command with filesize
             print("\n[2/5] Sending file information...")
-            self.conn.sendall((command + " " + str(filesize) + "\n").encode())
+            self.conn.sendall((command + "|" + str(filesize) + "\n").encode())
 
             request_action = self.buf_conn.recv_until(b"\n")
 
-            if request_action == "2":
+            if request_action == b"2":
                 print("Receiver has declined the transfer")
                 print("Shutting the sending procedure")
                 return False
@@ -286,7 +304,14 @@ class Server:
             print("[3/5] Exchanging encryption keys...")
             try:
                 public_key_dict = self.buf_conn.recv_until(b"\n")
-                public_key_json = json.loads(public_key_dict)
+                if public_key_dict == b"":
+                    print("[Error] No public key received (timeout/disconnect)")
+                    return False
+                if public_key_dict is None:
+                    print("[Error] Connection closed while waiting for public key")
+                    self.not_connected_to_cli = True
+                    return False
+                public_key_json = json.loads(public_key_dict.decode("utf-8"))
             except socket.timeout:
                 print("[Error] Timeout waiting for client's public key")
                 return False
@@ -327,6 +352,11 @@ class Server:
             }
             key_dict_json = json.dumps(key_dict)
             self.conn.sendall((key_dict_json + "\n").encode("utf-8"))
+            dkm = self.buf_conn.recv_until(b"\n")
+                
+            if dkm == b"Corrupted":
+                print("[Client Error] Client failed to decrypt session key")
+                return False
             print("[3/5] ✓ Encryption keys exchanged")
 
             # Step 3: Send file in chunks
@@ -377,11 +407,12 @@ class Server:
                         
                         # Progress indicator
                         elapsed = time.time()-start
-                        rate = send_chunk_size / elapsed
+                        rate = send_chunk_size / elapsed if elapsed > 0 else 0.0
                         progress = (send_chunk_size / filesize) * 100
+                        time_remaining = (filesize-send_chunk_size)/rate if rate > 0 else 0.0 
                         print(f"[4/5] Progress: {progress:.1f}% | Chunk {chunk_number} | "
                               f"{send_chunk_size}/{filesize} bytes | Speed {rate/1024**2:.2f}MB/s |"
-                              f"Time Remaiing {format_time((filesize-send_chunk_size)/rate)}", end="\r", flush=True)
+                              f"Time Remaiing {format_time(time_remaining)}", end="\r", flush=True)
                 
                 print()  # New line after progress
                 

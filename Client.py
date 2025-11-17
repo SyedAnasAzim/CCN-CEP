@@ -73,46 +73,56 @@ def progress_bar(got, filesize, start_time, bar_len=50):
 def recv_full(sock, filesize, aesgcm):
     """
     Receive and decrypt full file.
-    
-    Raises:
-        socket.timeout: If transfer times out
-        ConnectionError: If connection fails
-        ValueError: If decryption or hash verification fails
+    Returns: bytes on success, or None on failure.
     """
     start_time = time.time()
     buf = bytearray()
-    got = 0
+    got = 0 #it keeps track of how much bytes we get
     chunk_count = 0
-    
+
     try:
         while got < filesize:
             try:
-                data = sock.recv_until(b"\n").decode('utf-8')
+                raw = sock.recv_until(b"\n")
             except socket.timeout:
                 print(f"\n[Timeout] Transfer stalled after {got}/{filesize} bytes")
-                raise
+                return None
             except (ConnectionResetError, BrokenPipeError) as e:
                 print(f"\n[Connection Lost] After {got}/{filesize} bytes: {e}")
-                raise
-            
-            if not data:
-                raise ConnectionError("Peer disconnected: No data received")
-            
+                return None
+            except Exception as e:
+                print(f"\n[Receive Error] recv_until failed: {e}")
+                return None
+
+            if not raw:
+                print("[Receive Error] Peer disconnected: No data received")
+                return None
+
+            try:
+                data = raw.decode("utf-8")
+            except Exception as e:
+                print(f"[Receive Error] Decode error: {e}")
+                return None
+
             try:
                 data_json = json.loads(data)
             except json.JSONDecodeError as e:
-                raise ValueError(f"Invalid JSON received: {e}")
-            
+                print(f"[Receive Error] Invalid JSON received: {e}")
+                return None
+
             # Validate chunk data
-            if "Nonce" not in data_json or "Data" not in data_json or "Size" not in data_json or "Hash" not in data_json:
-                raise ValueError("Incomplete chunk data received")
-            
+            required = {"Nonce", "Data", "Size", "Hash", "Chunk"}
+            if not required.issubset(data_json.keys()):
+                print(f"[Receive Error] Incomplete chunk data. Keys present: {list(data_json.keys())}")
+                return None
+
             try:
                 nonce = b64decode(data_json["Nonce"])
                 encrypted_data = b64decode(data_json["Data"])
             except Exception as e:
-                raise ValueError(f"Base64 decode error: {e}")
-            
+                print(f"[Receive Error] Base64 decode error: {e}")
+                return None
+
             # Decrypt chunk
             try:
                 decrypted_chunk = aesgcm.decrypt(
@@ -121,25 +131,32 @@ def recv_full(sock, filesize, aesgcm):
                     associated_data=None
                 )
             except InvalidTag:
-                raise ValueError(f"Decryption failed for chunk {chunk_count + 1}")
-            
+                print(f"[Receive Error] Decryption failed (InvalidTag) for chunk {data_json.get('Chunk')}")
+                return None
+            except Exception as e:
+                print(f"[Receive Error] Decryption error for chunk {data_json.get('Chunk')}: {e}")
+                return None
+
             # Verify hash
             hash_data = create_hash(decrypted_chunk)
             if data_json["Hash"] != hash_data:
-                print(f"\n❌ [Corruption] Chunk {data_json['Chunk']} failed hash verification")
+                print(f"\n❌ [Corruption] Chunk {data_json.get('Chunk')} failed hash verification")
                 return None
-            
+
             buf.extend(decrypted_chunk)
-            got += data_json["Size"]
+            try:
+                got += int(data_json["Size"])
+            except Exception:
+                got += len(decrypted_chunk)
             chunk_count += 1
             progress_bar(got, filesize, start_time)
-        
+
         print()
         return bytes(buf)
-    
+
     except Exception as e:
-        print(f"\n[Receive Error] {e}")
-        raise
+        print(f"\n[Receive Error] Unexpected exception: {e}")
+        return None
 
 class Client:
     """Client class for encrypted file transfer"""
@@ -151,20 +168,22 @@ class Client:
         self.client = None
         self.buf_conn = None
         self.is_connected = False
-        
+        self.not_connected_to_ser = False
+
         try:
             # 1. Create and connect socket
-            self._create_and_connect()
-            
-            # 2. Perform handshake
-            self._handshake()
-            
-            self.is_connected = True
+            if self._create_and_connect():
+                # 2. Perform handshake
+                if self._handshake():
+                    self.is_connected = True
+            else:
+                print("[Client] ❌ Failed to create or connect socket")
+                return
             
         except Exception as e:
             # Cleanup and re-raise
             self.cleanup()
-            raise
+            return
     
     def _create_and_connect(self):
         """Create socket and connect to server"""
@@ -176,38 +195,35 @@ class Client:
                 self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             except socket.error as e:
                 print(f"[Socket Error] Failed to create socket: {e}")
-                raise
+                return False
             
             # Set timeout
-            self.client.settimeout(30)
+            self.client.settimeout(60)
             
             # Connect to server
             try:
                 self.client.connect((self.ip, self.port))
                 print(f"[Client] ✓ Connected to {self.ip}:{self.port}")
-            except socket.timeout:
-                print(f"\n[Timeout] Server not responding at {self.ip}:{self.port}")
-                print("💡 Check if server is running")
-                raise
             except ConnectionRefusedError:
                 print(f"\n[Connection Refused] Cannot connect to {self.ip}:{self.port}")
                 print("\n💡 Make sure:")
                 print("   • Server is running")
                 print("   • IP address is correct")
                 print("   • Port is not blocked by firewall")
-                raise
+                return False
             except socket.gaierror:
                 print(f"\n[Error] Invalid IP address: {self.ip}")
-                raise
+                return False
             except OSError as e:
                 print(f"\n[Connection Error] {e}")
-                raise
+                return False
             
             self.buf_conn = BufferedSocket(self.client)
-            
+            return True
+        
         except socket.error as e:
             print(f"[Socket Error] {e}")
-            raise
+            return False
     
     def _handshake(self):
         """Perform three-way handshake with server"""
@@ -220,34 +236,41 @@ class Client:
             
             # Step 2: Receive SYN-ACK
             try:
-                reply = self.buf_conn.recv_until(b"\n").decode().strip()
+                reply = self.buf_conn.recv_until(b"\n")
+                if reply:
+                    reply = reply.decode().strip()
             except socket.timeout:
                 print("[Handshake Error] Timeout - server not responding")
-                raise
+                return False
             except (ConnectionResetError, BrokenPipeError) as e:
                 print(f"[Handshake Error] Connection lost: {e}")
-                raise
+                return False
             
             if not reply:
-                raise ConnectionError("Server disconnected during handshake")
+                print("Server disconnected during handshake")
+                print("Shutting off the connection process")
+                return False
             if reply != "SYN-ACK":
-                raise ValueError(f"Expected SYN-ACK, got '{reply}'")
+                print(f"Expected SYN-ACK, got '{reply}'")
+                print("Shutting off the connection process")
+                return False
             print("[Handshake] ← Received: SYN-ACK")
             
             # Step 3: Send ACK
             self.client.sendall("ACK\n".encode())
             print("[Handshake] → Sent: ACK")
             print("[Handshake] ✓ Handshake successful!\n")
+            return True
             
         except socket.timeout:
             print("[Handshake Error] Server not responding")
-            raise
+            return False
         except ConnectionResetError:
             print("[Handshake Error] Server disconnected")
-            raise
+            return False
         except BrokenPipeError:
             print("[Handshake Error] Connection broken")
-            raise
+            return False
     
     def cleanup(self):
         """Clean up resources"""
@@ -271,7 +294,12 @@ class Client:
             # Step 1: Wait for command
             print("[1/5] Waiting for file information...")
             try:
-                command = self.buf_conn.recv_until(b"\n").decode().strip()
+                command = self.buf_conn.recv_until(b"\n")
+                if not command:
+                    print("[Error] No data (timeout/disconnect)")
+                    self.not_connected_to_ser = True
+                    return False
+                command = command.decode().strip()
             except socket.timeout:
                 print("[Error] Timeout waiting for server")
                 return False
@@ -279,24 +307,29 @@ class Client:
                 print(f"[Error] Connection lost: {e}")
                 return False
             
-            comm_list = command.split()
+            comm_list = command.split('|')
             
             # Validate command
             if len(comm_list) != 3 or comm_list[0].lower() != "send":
                 print(f"[Error] Invalid command from server: {command}")
                 return False
             
-            filename = comm_list[1]
+            filename = comm_list[1].split('/')[-1]
             filesize = int(comm_list[2])
-            
-            print(f"[Info] File: {filename}    Extension: {filename.split(".")[-1]}")
-            print(f"[Info] Size: {filesize / (1024**2):.2f} MB ({filesize} bytes)")
-            print(f"[Info] Free Space: {disk_usage("/")[-1]/1024**3}")
-            print("[Decision]:")
-            print("\t1. Accept")
-            print("\t2. Ignore")
+
             while True:
+                print(f"[Info] File: {filename}    " f"Extension: {filename.split('.')[-1]}")
+                print(f"[Info] Size: {filesize / (1024**2):.2f} MB ({filesize} bytes)")
+                print(f"[Info] Free Space: {format_bytes(disk_usage('/')[-1]/1024**3)}")
+                print("[Decision]:")
+                print("\t1. Accept")
+                print("\t2. Ignore")
                 request_action = input("Action: ").encode() + b"\n"
+                # checking desk space
+                if not is_there_space(filesize):
+                    print("\nYou have low disk space (Rejecting the transfer)")
+                    self.client.sendall(b"2\n")
+                    return False
                 if request_action == b"1\n":
                     self.client.sendall(request_action)
                     break
@@ -306,10 +339,6 @@ class Client:
                     return False
                 else:
                     print("Wrong command")
-
-            # Check disk space
-            if not is_there_space(filesize):
-                return False
             
             print("[Check] ✓ Sufficient disk space available")
             
@@ -338,8 +367,11 @@ class Client:
             # Step 3: Receive encrypted Key
             print("[3/5] Exchanging encryption keys...")
             try:
-                key_dict = self.buf_conn.recv_until(b"\n").decode("utf-8")
-                key_dict_json = json.loads(key_dict)
+                key_dict = self.buf_conn.recv_until(b"\n")
+                if not key_dict:
+                    print("[Error] No data (timeout/disconnect)")
+                    return False
+                key_dict_json = json.loads(key_dict.decode("utf-8"))
             except socket.timeout:
                 print("[Error] Timeout waiting for encryption key")
                 return False
@@ -357,14 +389,23 @@ class Client:
             encrypted_key = b64decode(key_dict_json["Key"])
             
             # Decrypt AES-GCM using RSA private key
-            key = private_key.decrypt(
-                encrypted_key,
-                padding.OAEP(
-                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                    algorithm=hashes.SHA256(),
-                    label=None
+            try:
+                key = private_key.decrypt(
+                    encrypted_key,
+                    padding.OAEP(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        algorithm=hashes.SHA256(),
+                        label=None
+                    )
                 )
-            )
+            except Exception as e:
+                print(f"[Error] Failed to decrypt session key: {e}")
+                try:
+                    self.client.sendall(b"Corrupted\n")
+                except:
+                    pass
+                return False
+            self.client.sendall(b"Ok\n")
             print("[3/5] ✓ Encryption keys exchanged")
             
             # Create AES-GCM object

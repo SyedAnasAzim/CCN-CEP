@@ -1,14 +1,9 @@
-#!/usr/bin/env python3
-"""
-CUBE - Encrypted File Transfer Application
-Secure file sharing using RSA-2048 + AES-256-GCM encryption
-"""
-
 from Server import Server
 from Client import Client
 import socket
 import os
 import sys
+import time
 from re import match
 
 IP_PATTERN = r"^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$"
@@ -71,33 +66,32 @@ while True:
     
     # Option 1: Send Files
     if choice == "1":
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print("\n" + "="*60)
+        print("📤 SEND FILES MODE")
+        print("="*60 + "\n")
+        
         while True:
-            os.system('cls' if os.name == 'nt' else 'clear')
-            print("\n" + "="*60)
-            print("📤 SEND FILES MODE")
-            print("="*60 + "\n")
+            print("Select IP Configuration:")
+            print("  1. Your Local IP  (for network transfer)")
+            print("  2. Localhost      (for testing on same machine)\n")
             
-            while True:
-                print("Select IP Configuration:")
-                print("  1. Your Local IP  (for network transfer)")
-                print("  2. Localhost      (for testing on same machine)\n")
-                
-                select = input("Enter your choice [1-2]: ").strip()
-                
-                if select == "1":
-                    ip = get_my_ip()
-                    print(f"\n✓ Using your IP: {ip}\n")
-                    server = Server(ip=ip)
-                    break
-                elif select == "2":
-                    ip = "localhost"
-                    print(f"\n✓ Using: {ip}\n")
-                    server = Server()
-                    break
-                else:
-                    print("❌ Invalid choice. Please select 1 or 2.\n")
+            select = input("Enter your choice [1-2]: ").strip()
             
-            
+            if select == "1":
+                ip = get_my_ip()
+                print(f"\n✓ Using your IP: {ip}\n")
+                server = Server(ip=ip)
+                break
+            elif select == "2":
+                ip = "localhost"
+                print(f"\n✓ Using: {ip}\n")
+                server = Server()
+                break
+            else:
+                print("❌ Invalid choice. Please select 1 or 2.\n")
+        
+        while True:  
             ret = server.sending()
             
             print("\n" + "="*60)
@@ -106,46 +100,52 @@ while True:
             else:
                 print("❌ FILE TRANSFER FAILED OR CANCELLED")
             print("="*60 + "\n")
-            
-            select = input("Send another file? [y/n]: ").strip()
+            if server.not_connected_to_cli:
+                print("\nConnection between Server and Client has been lost\n")
+                for i in range(5,0,-1):
+                    print(f"\rReturing to main menu in {i} seconds....",end="",flush=True)
+                    time.sleep(1)
+                server.close_connection()
+                break
+            select = input("Send another file? [y for yes or any other key to stop]: ").strip()
             if select.lower() != "y":
                 server.close_connection()
                 break
         
-        input("\n📌 Press Enter to return to main menu...")
+        
+        # input("\n📌 Press Enter to return to main menu...")
     
     # Option 2: Receive Files
     elif choice == "2":
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print("\n" + "="*60)
+        print("📥 RECEIVE FILES MODE")
+        print("="*60 + "\n")
+        
         while True:
-            os.system('cls' if os.name == 'nt' else 'clear')
-            print("\n" + "="*60)
-            print("📥 RECEIVE FILES MODE")
-            print("="*60 + "\n")
+            print("Select Server Connection:")
+            print("  1. Enter Server IP  (network transfer)")
+            print("  2. Localhost        (testing on same machine)\n")
             
-            while True:
-                print("Select Server Connection:")
-                print("  1. Enter Server IP  (network transfer)")
-                print("  2. Localhost        (testing on same machine)\n")
-                
-                select = input("Enter your choice [1-2]: ").strip()
-                
-                if select == "1":
-                    ip = input("\nEnter server IP address: ").strip()
-                    match_ip = match(IP_PATTERN,ip)
-                    if not match_ip:
-                        print("❌ No IP provided. Please try again.\n")
-                        continue
-                    print(f"\n✓ Connecting to: {ip}\n")
-                    client = Client(ip=ip)
-                    break
-                elif select == "2":
-                    ip = "localhost"
-                    print(f"\n✓ Connecting to: {ip}\n")
-                    client = Client()
-                    break
-                else:
-                    print("❌ Invalid choice. Please select 1 or 2.\n")
+            select = input("Enter your choice [1-2]: ").strip()
             
+            if select == "1":
+                ip = input("\nEnter server IP address: ").strip()
+                match_ip = match(IP_PATTERN,ip)
+                if not match_ip:
+                    print("❌ No IP provided. Please try again.\n")
+                    continue
+                print(f"\n✓ Connecting to: {ip}\n")
+                client = Client(ip=ip)
+                break
+            elif select == "2":
+                ip = "localhost"
+                print(f"\n✓ Connecting to: {ip}\n")
+                client = Client()
+                break
+            else:
+                print("❌ Invalid choice. Please select 1 or 2.\n")
+        while True:
             ret = client.receiving()
             
             print("\n" + "="*60)
@@ -155,13 +155,19 @@ while True:
             else:
                 print("❌ FILE TRANSFER FAILED OR CANCELLED")
             print("="*60 + "\n")
-            
-            select = input("Receive another file? [y/n]: ").strip()
+            if client.not_connected_to_ser:
+                print("\nConnection between Server and Client has been lost\n")
+                for i in range(5,0,-1):
+                    print(f"\rReturing to main menu in {i} seconds....",end="",flush=True)
+                    time.sleep(1)
+                client.close_connection()
+                break
+            select = input("Receive another file? [y for yes or any other key to stop]: ").strip()
             if select.lower() != "y":
                 client.close_connection()
                 break
             
-        input("\n📌 Press Enter to return to main menu...")
+        # input("\n📌 Press Enter to return to main menu...")
     
     # Option 3: Help
     elif choice == "3":
@@ -173,8 +179,8 @@ while True:
     OVERVIEW:
     ─────────
     CUBE is an encrypted file transfer application that allows
-    secure file sharing between two devices using military-grade
-    encryption (RSA-2048 + AES-256-GCM).
+    secure file sharing between two devices using encryption 
+    (RSA-2048 + AES-256-GCM).
     
     FEATURES:
     ─────────
