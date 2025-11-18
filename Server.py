@@ -400,9 +400,11 @@ class Server:
                             self.conn.sendall((chunk_dict_json + "\n").encode("utf-8"))
                         except (ConnectionResetError, BrokenPipeError) as e:
                             print(f"\n[Error] Connection lost during transfer: {e}")
+                            self.not_connected_to_cli = True
                             return False
                         except socket.timeout:
                             print(f"\n[Error] Timeout during transfer")
+                            self.not_connected_to_cli = True
                             return False
                         
                         # Progress indicator
