@@ -1,0 +1,210 @@
+PROBLEMS TO FIX
+
+Memory use — recv_full collects the entire file in memory (bytes(buf)) so a 16 GB file will likely OOM (crash).
+
+Disk-space reporting bug — you sometimes print disk_usage('/')[-1]/1024**3 which is misleading; use free (bytes) directly.
+
+JSON + base64 overhead — each chunk is JSON+base64 (≈+33% wire size) and CPU-heavy. Works but slower and larger on the wire.
+
+Timeouts — 60s socket timeout may be too short for long or slow transfers; consider increasing or use keepalive.
+
+No resume/retry — large transfers are prone to interruption; there is no resume protocol.
+
+Nonce reuse risk — random 12-byte nonces are usually OK but repeated nonces for the same key must be avoided. Deterministic counters are safer.
+
+Progress & speed — progress is per-chunk and OK, but consider smoothing speed estimate for long transfers.
+
+MINIMAL SAFE FIX (SUMMARY)
+
+Do NOT accumulate the whole file in memory on the receiver. Stream to disk: decrypt each chunk and write it immediately.
+
+Use a streaming recv_full_stream_to_file that writes each decrypted chunk to disk and flushes periodically.
+
+After streaming completes, send "Ok\n" to server and report saved file size.
+
+Keep chunk-level hash verification and decryption checks (you already do).
+
+Optionally reduce fsync frequency (fsync every N chunks or at end) to speed up writes.
+
+STREAM-TO-DISK FUNCTION (paste into your code replacing recv_full)
+(definition start)
+def recv_full_stream_to_file(sock, filesize, aesgcm, out_path, start_chunk=0):
+"""
+Receive, decrypt and write file to disk chunk-by-chunk.
+Returns True on success, False on failure.
+"""
+start_time = time.time()
+got = 0
+chunk_count = 0
+
+# ensure parent dir exists
+os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+try:
+    # Open file in wb mode (overwrite). If you want resume, open 'r+b' and seek.
+    with open(out_path, "wb") as outf:
+        while got < filesize:
+            try:
+                raw = sock.recv_until(b"\n")
+            except socket.timeout:
+                print(f"\n[Timeout] Transfer stalled after {got}/{filesize} bytes")
+                return False
+            except (ConnectionResetError, BrokenPipeError) as e:
+                print(f"\n[Connection Lost] After {got}/{filesize} bytes: {e}")
+                return False
+            except Exception as e:
+                print(f"\n[Receive Error] recv_until failed: {e}")
+                return False
+
+            if not raw:
+                print("[Receive Error] Peer disconnected: No data received")
+                return False
+
+            # parse JSON chunk
+            try:
+                data_json = json.loads(raw.decode("utf-8"))
+            except Exception as e:
+                print(f"[Receive Error] Invalid JSON received: {e}")
+                return False
+
+            # validate chunk fields
+            required = {"Nonce", "Data", "Size", "Hash", "Chunk"}
+            if not required.issubset(data_json.keys()):
+                print(f"[Receive Error] Incomplete chunk data. Keys present: {list(data_json.keys())}")
+                return False
+
+            try:
+                nonce = b64decode(data_json["Nonce"])
+                encrypted_data = b64decode(data_json["Data"])
+            except Exception as e:
+                print(f"[Receive Error] Base64 decode error: {e}")
+                return False
+
+            # decrypt
+            try:
+                decrypted_chunk = aesgcm.decrypt(
+                    data=encrypted_data,
+                    nonce=nonce,
+                    associated_data=None
+                )
+            except InvalidTag:
+                print(f"[Receive Error] Decryption failed (InvalidTag) for chunk {data_json.get('Chunk')}")
+                return False
+            except Exception as e:
+                print(f"[Receive Error] Decryption error for chunk {data_json.get('Chunk')}: {e}")
+                return False
+
+            # verify hash
+            hash_data = create_hash(decrypted_chunk)
+            if data_json["Hash"] != hash_data:
+                print(f"\n❌ [Corruption] Chunk {data_json.get('Chunk')} failed hash verification")
+                return False
+
+            # write chunk immediately to file (streaming)
+            try:
+                outf.write(decrypted_chunk)
+                outf.flush()
+                os.fsync(outf.fileno())
+            except Exception as e:
+                print(f"\n[Disk Error] Failed to write to disk: {e}")
+                return False
+
+            # update counters
+            try:
+                got += int(data_json["Size"])
+            except Exception:
+                got += len(decrypted_chunk)
+            chunk_count += 1
+
+            # show progress (reuse your progress_bar)
+            progress_bar(got, filesize, start_time)
+
+        print()  # newline after progress
+    return True
+
+except Exception as e:
+    print(f"\n[Receive Error] Unexpected exception: {e}")
+    return False
+
+
+(definition end)
+
+INTEGRATE STREAMING INTO CLIENT.receiving (replace recv_full usage)
+
+After AES key exchange, set:
+output_filename = f"{PATH}/{filename}"
+
+Call:
+ok = recv_full_stream_to_file(self.buf_conn, filesize, aesgcm, output_filename)
+
+If ok == False:
+send "Corrupted\n" and return False
+
+If ok == True:
+send "Ok\n", then print saved file info using os.path.getsize(output_filename)
+
+DISK-SPACE PRINT/CHECK FIX
+
+Replace any incorrect free-space print line:
+print(f"[Info] Free Space: {format_bytes(disk_usage('/')[-1]/1024**3)}")
+with:
+total, used, free = disk_usage("/")
+print(f"[Info] Free Space: {format_bytes(free)}")
+
+is_there_space(filesize) is fine if it compares bytes to bytes; keep the 1.1 overhead if you want.
+
+TIMEOUTS & SOCKET SETTINGS
+
+Increase socket timeouts for large transfers: e.g. socket.settimeout(300) or higher.
+
+Consider enabling TCP keepalive or sending periodic heartbeats.
+
+If using settimeout, be aware it affects blocking socket ops — handle socket.timeout exceptions.
+
+PERFORMANCE & SAFETY RECOMMENDATIONS
+
+JSON+base64 → binary frames: use length-prefixed binary frames instead of JSON+base64 for efficiency. (4- or 8-byte length header + raw bytes).
+
+Reduce fsync frequency: fsync every N chunks or only at end to speed up transfer (but risk more data loss on crash).
+
+Nonce scheme: replace random nonces with a deterministic counter-based nonce (e.g., 8-byte counter + 4 bytes random) to avoid collisions.
+
+Resume support: store last verified chunk index and implement resume so interrupted transfers continue instead of restarting.
+
+Chunk size: you already use 64 KB (65536) — fine. You may tune it depending on network and CPU.
+
+Retry logic: implement per-chunk retry or request re-send of a corrupted chunk.
+
+Logging: write transfer logs (chunk counts, bytes, errors) to a log file for later debugging.
+
+OPTIONAL PROTOCOL IMPROVEMENTS (for later)
+
+Switch to length-prefixed binary frames to remove base64 and JSON overhead.
+
+Add a handshake that supports "resume from chunk N".
+
+Add per-chunk ACKs (server sends ack per chunk) — increases reliability at cost of latency.
+
+Add multiplexed checksums (e.g., per-file and per-chunk) and optional sparse verification.
+
+Use a small manifest file describing total chunks + sizes + hashes so receiver can verify quickly.
+
+ADDITIONAL TUNING FOR 16GB
+
+Test locally with smaller files first (100 MB → 1 GB) to tune timeouts and fsync frequency.
+
+If transfer stays on same machine (localhost), it should be fast; if across network, expect lower throughput.
+
+Consider disabling console fsync/flush for speed during tests; enable it in production for safety.
+
+NEXT STEPS (pick one)
+
+I can provide a version that uses binary length-prefixed frames (faster).
+
+I can add a resume capability with saved chunk index.
+
+I can change nonce generation to a deterministic counter-based nonce.
+
+I can produce a smaller test harness to simulate and test a 16 GB transfer locally (without using 16 GB — e.g., sparse files).
+
+Say the number of the option you want and I’ll give the full code change.
